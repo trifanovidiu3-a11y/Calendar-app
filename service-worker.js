@@ -1,8 +1,6 @@
-const CACHE_NAME = 'day-blocks-v1';
+const CACHE_NAME = 'day-blocks-v2';
 
 const LOCAL_ASSETS = [
-  './',
-  './index.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
@@ -31,12 +29,34 @@ self.addEventListener('activate', (event) => {
   })());
 });
 
+// HTML is always fetched fresh when online, so updates show up immediately.
+// Falls back to the cached copy only when offline.
 self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  const isHTML = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
+
+  if (isHTML) {
+    event.respondWith((async () => {
+      try {
+        const res = await fetch(req);
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(req, res.clone());
+        return res;
+      } catch (e) {
+        const cache = await caches.open(CACHE_NAME);
+        return (await cache.match(req)) || (await cache.match('./index.html'));
+      }
+    })());
+    return;
+  }
+
   event.respondWith((async () => {
-    const cached = await caches.match(event.request);
+    const cached = await caches.match(req);
     if (cached) return cached;
     try {
-      const res = await fetch(event.request);
+      const res = await fetch(req);
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(req, res.clone());
       return res;
     } catch (e) {
       return cached;
