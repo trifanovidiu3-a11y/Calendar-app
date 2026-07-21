@@ -19,7 +19,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useRef, useCallback, useEffect } = React;
+const { useState, useRef, useCallback, useEffect, useLayoutEffect } = React;
 
 const storage = {
   async get(key) {
@@ -37,8 +37,9 @@ const WEEKDAY = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const MONTH_NAMES = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 const PALETTE = ['#F5A623', '#34D399', '#4E9EFF', '#9B6BFF', '#FF6FA5', '#2DD4C7', '#F5D033', '#8A8A85'];
 const PAGE_SIZE = 9; // 3x3
-const INITIAL_DAYS = 45;
-const CHUNK_DAYS = 45;
+const INITIAL_BEFORE = 18; // 2 pages of past pre-loaded
+const INITIAL_AFTER = 45;  // 5 pages of future pre-loaded
+const CHUNK = 45;          // extend by this many days when nearing either edge
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -80,9 +81,11 @@ function DayBlocks() {
   const [draftDetail, setDraftDetail] = useState('');
   const [bulletDraft, setBulletDraft] = useState('');
   const [pageIndex, setPageIndex] = useState(0);
-  const [dayCount, setDayCount] = useState(INITIAL_DAYS);
+  const [daysBefore, setDaysBefore] = useState(INITIAL_BEFORE);
+  const [daysAfter, setDaysAfter] = useState(INITIAL_AFTER);
 
   const pagerRef = useRef(null);
+  const prevBeforeRef = useRef(INITIAL_BEFORE);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,6 +101,29 @@ function DayBlocks() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // land on today's page once the pager first mounts
+  useLayoutEffect(() => {
+    if (!loading && pagerRef.current) {
+      const pageWidth = pagerRef.current.clientWidth;
+      const todayPage = Math.floor(INITIAL_BEFORE / PAGE_SIZE);
+      pagerRef.current.scrollLeft = todayPage * pageWidth;
+      setPageIndex(todayPage);
+    }
+  }, [loading]);
+
+  // compensate scroll position when new past days are prepended, so the view doesn't jump
+  useLayoutEffect(() => {
+    const prev = prevBeforeRef.current;
+    const delta = daysBefore - prev;
+    if (delta > 0 && pagerRef.current) {
+      const pageWidth = pagerRef.current.clientWidth;
+      const pagesAdded = delta / PAGE_SIZE;
+      pagerRef.current.scrollLeft += pagesAdded * pageWidth;
+      setPageIndex((p) => p + pagesAdded);
+    }
+    prevBeforeRef.current = daysBefore;
+  }, [daysBefore]);
 
   const persist = useCallback(async (next) => {
     setEntries(next);
@@ -145,22 +171,24 @@ function DayBlocks() {
   };
 
   const scrollToToday = () => {
-    if (pagerRef.current) pagerRef.current.scrollTo({ left: 0, behavior: 'smooth' });
-    setPageIndex(0);
+    if (pagerRef.current) {
+      const pageWidth = pagerRef.current.clientWidth;
+      const todayPage = Math.floor(daysBefore / PAGE_SIZE);
+      pagerRef.current.scrollTo({ left: todayPage * pageWidth, behavior: 'smooth' });
+      setPageIndex(todayPage);
+    }
   };
 
   const handleScroll = (e) => {
     const el = e.currentTarget;
     const idx = Math.round(el.scrollLeft / el.clientWidth);
     setPageIndex(idx);
-    setDayCount((c) => {
-      const totalPages = Math.ceil(c / PAGE_SIZE);
-      if (idx >= totalPages - 2) return c + CHUNK_DAYS;
-      return c;
-    });
+    const totalPages = Math.ceil((daysBefore + daysAfter) / PAGE_SIZE);
+    if (idx >= totalPages - 2) setDaysAfter((d) => d + CHUNK);
+    if (idx <= 1) setDaysBefore((d) => d + CHUNK);
   };
 
-  const allDates = Array.from({ length: dayCount }, (_, i) => addDays(today, i));
+  const allDates = Array.from({ length: daysBefore + daysAfter }, (_, i) => addDays(today, i - daysBefore));
   const pages = [];
   for (let i = 0; i < allDates.length; i += PAGE_SIZE) pages.push(allDates.slice(i, i + PAGE_SIZE));
 
@@ -311,7 +339,7 @@ function DayBlocks() {
         <div className="db-title">{headerLabel}</div>
         <button className="db-today-btn" onClick={scrollToToday}>TODAY</button>
       </div>
-      <div className="db-hint">TAP A BLOCK TO SET IT</div>
+      <div className="db-hint">TAP A BLOCK TO SET IT · SWIPE EITHER WAY</div>
 
       {loading ? (
         <div className="db-loading">LOADING…</div>
