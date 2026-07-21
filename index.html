@@ -37,9 +37,10 @@ const WEEKDAY = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const MONTH_NAMES = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 const PALETTE = ['#F5A623', '#34D399', '#4E9EFF', '#9B6BFF', '#FF6FA5', '#2DD4C7', '#F5D033', '#8A8A85'];
 const PAGE_SIZE = 9; // 3x3
-const INITIAL_BEFORE = 18; // 2 pages of past pre-loaded
+const INITIAL_BEFORE = 36; // 4 pages of past pre-loaded
 const INITIAL_AFTER = 45;  // 5 pages of future pre-loaded
 const CHUNK = 45;          // extend by this many days when nearing either edge
+const APP_VERSION = 'V3.2';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -86,6 +87,19 @@ function DayBlocks() {
 
   const pagerRef = useRef(null);
   const prevBeforeRef = useRef(INITIAL_BEFORE);
+  const suppressScrollRef = useRef(false);
+  const suppressTimerRef = useRef(null);
+  const extendTimerRef = useRef(null);
+
+  // ignore scroll events for `ms` ms — used whenever WE move the scroll position
+  // programmatically, so that isn't mistaken for the user swiping near an edge
+  const suppressScrollFor = (ms) => {
+    suppressScrollRef.current = true;
+    if (suppressTimerRef.current) window.clearTimeout(suppressTimerRef.current);
+    suppressTimerRef.current = window.setTimeout(() => {
+      suppressScrollRef.current = false;
+    }, ms);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +119,7 @@ function DayBlocks() {
   // land on today's page once the pager first mounts
   useLayoutEffect(() => {
     if (!loading && pagerRef.current) {
+      suppressScrollFor(200);
       const pageWidth = pagerRef.current.clientWidth;
       const todayPage = Math.floor(INITIAL_BEFORE / PAGE_SIZE);
       pagerRef.current.scrollLeft = todayPage * pageWidth;
@@ -117,6 +132,7 @@ function DayBlocks() {
     const prev = prevBeforeRef.current;
     const delta = daysBefore - prev;
     if (delta > 0 && pagerRef.current) {
+      suppressScrollFor(200);
       const pageWidth = pagerRef.current.clientWidth;
       const pagesAdded = delta / PAGE_SIZE;
       pagerRef.current.scrollLeft += pagesAdded * pageWidth;
@@ -172,6 +188,7 @@ function DayBlocks() {
 
   const scrollToToday = () => {
     if (pagerRef.current) {
+      suppressScrollFor(700);
       const pageWidth = pagerRef.current.clientWidth;
       const todayPage = Math.floor(daysBefore / PAGE_SIZE);
       pagerRef.current.scrollTo({ left: todayPage * pageWidth, behavior: 'smooth' });
@@ -180,12 +197,18 @@ function DayBlocks() {
   };
 
   const handleScroll = (e) => {
+    if (suppressScrollRef.current) return;
     const el = e.currentTarget;
     const idx = Math.round(el.scrollLeft / el.clientWidth);
     setPageIndex(idx);
-    const totalPages = Math.ceil((daysBefore + daysAfter) / PAGE_SIZE);
-    if (idx >= totalPages - 2) setDaysAfter((d) => d + CHUNK);
-    if (idx <= 1) setDaysBefore((d) => d + CHUNK);
+
+    if (extendTimerRef.current) window.clearTimeout(extendTimerRef.current);
+    extendTimerRef.current = window.setTimeout(() => {
+      if (suppressScrollRef.current) return;
+      const totalPages = Math.ceil((daysBefore + daysAfter) / PAGE_SIZE);
+      if (idx >= totalPages - 2) setDaysAfter((d) => d + CHUNK);
+      if (idx <= 1) setDaysBefore((d) => d + CHUNK);
+    }, 120);
   };
 
   const allDates = Array.from({ length: daysBefore + daysAfter }, (_, i) => addDays(today, i - daysBefore));
@@ -234,7 +257,8 @@ function DayBlocks() {
           padding: 7px 10px; cursor: pointer;
         }
         .db-today-btn:active { border-color: var(--accent); color: var(--accent); }
-        .db-hint { font-size: 10px; color: var(--text-dim); letter-spacing: 0.5px; padding: 10px 16px 8px; flex-shrink: 0; }
+        .db-hint { display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: var(--text-dim); letter-spacing: 0.5px; padding: 10px 16px 8px; flex-shrink: 0; }
+        .db-version { opacity: 0.55; }
 
         .db-pager {
           flex: 1;
@@ -339,7 +363,10 @@ function DayBlocks() {
         <div className="db-title">{headerLabel}</div>
         <button className="db-today-btn" onClick={scrollToToday}>TODAY</button>
       </div>
-      <div className="db-hint">TAP A BLOCK TO SET IT · SWIPE EITHER WAY</div>
+      <div className="db-hint">
+        <span>TAP A BLOCK TO SET IT</span>
+        <span className="db-version">{APP_VERSION}</span>
+      </div>
 
       {loading ? (
         <div className="db-loading">LOADING…</div>
