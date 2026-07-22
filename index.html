@@ -45,7 +45,7 @@ const DEFAULT_ZOOM = 1; // index into ZOOM_LEVELS — starts at 3x3
 const INITIAL_BEFORE = 36; // 4 pages at the default 3x3 zoom
 const INITIAL_AFTER = 45;  // 5 pages at the default 3x3 zoom
 const CHUNK_PAGES = 5;     // extend by this many pages (not days) when nearing either edge — scales with zoom
-const APP_VERSION = 'V4.0';
+const APP_VERSION = 'V4.1';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -291,7 +291,7 @@ function DayBlocks() {
       el.removeEventListener('touchend', onTouchEnd);
       el.removeEventListener('touchcancel', onTouchEnd);
     };
-  }, [zoomStep]);
+  }, [zoomStep, loading]);
 
   const allDates = Array.from({ length: daysBefore + daysAfter }, (_, i) => addDays(today, i - daysBefore));
   const pages = [];
@@ -358,6 +358,7 @@ function DayBlocks() {
           overflow-y: hidden;
           scroll-snap-type: x mandatory;
           -webkit-overflow-scrolling: touch;
+          touch-action: pan-x;
           min-height: 0;
         }
         .db-page {
