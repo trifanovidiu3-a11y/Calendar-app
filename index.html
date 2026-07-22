@@ -36,11 +36,16 @@ const storage = {
 const WEEKDAY = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const MONTH_NAMES = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 const PALETTE = ['#F5A623', '#34D399', '#4E9EFF', '#9B6BFF', '#FF6FA5', '#2DD4C7', '#F5D033', '#8A8A85'];
-const PAGE_SIZE = 9; // 3x3
-const INITIAL_BEFORE = 36; // 4 pages of past pre-loaded
-const INITIAL_AFTER = 45;  // 5 pages of future pre-loaded
-const CHUNK = 45;          // extend by this many days when nearing either edge
-const APP_VERSION = 'V3.2';
+const ZOOM_LEVELS = [
+  { cols: 2, rows: 2, tier: 'full' },
+  { cols: 3, rows: 3, tier: 'full' },
+  { cols: 5, rows: 6, tier: 'mini' },
+];
+const DEFAULT_ZOOM = 1; // index into ZOOM_LEVELS — starts at 3x3
+const INITIAL_BEFORE = 36; // 4 pages at the default 3x3 zoom
+const INITIAL_AFTER = 45;  // 5 pages at the default 3x3 zoom
+const CHUNK_PAGES = 5;     // extend by this many pages (not days) when nearing either edge — scales with zoom
+const APP_VERSION = 'V4.0';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -84,12 +89,20 @@ function DayBlocks() {
   const [pageIndex, setPageIndex] = useState(0);
   const [daysBefore, setDaysBefore] = useState(INITIAL_BEFORE);
   const [daysAfter, setDaysAfter] = useState(INITIAL_AFTER);
+  const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM);
+
+  const { cols, rows, tier } = ZOOM_LEVELS[zoomIndex];
+  const PAGE_SIZE = cols * rows;
 
   const pagerRef = useRef(null);
   const prevBeforeRef = useRef(INITIAL_BEFORE);
   const suppressScrollRef = useRef(false);
   const suppressTimerRef = useRef(null);
   const extendTimerRef = useRef(null);
+  const anchorDateRef = useRef(today);
+  const pinchRef = useRef({ active: false, startDist: 0, lastDist: 0 });
+  const pagesForGestureRef = useRef([]);
+  const pageIndexRef = useRef(0);
 
   // ignore scroll events for `ms` ms — used whenever WE move the scroll position
   // programmatically, so that isn't mistaken for the user swiping near an edge
@@ -140,6 +153,22 @@ function DayBlocks() {
     }
     prevBeforeRef.current = daysBefore;
   }, [daysBefore]);
+
+  // when zoom level changes, re-find the date we were looking at and land back on it
+  useLayoutEffect(() => {
+    if (!pagerRef.current || loading) return;
+    suppressScrollFor(200);
+    const anchor = anchorDateRef.current;
+    const offsetDays = Math.round((anchor - today) / 86400000);
+    const indexInAll = daysBefore + offsetDays;
+    const newPage = Math.max(0, Math.floor(indexInAll / PAGE_SIZE));
+    const pageWidth = pagerRef.current.clientWidth;
+    pagerRef.current.scrollLeft = newPage * pageWidth;
+    setPageIndex(newPage);
+    // eslint-disable-next-line
+  }, [zoomIndex]);
+
+  // pinch-to-zoom listener is attached further below, after zoomStep is defined
 
   const persist = useCallback(async (next) => {
     setEntries(next);
@@ -205,15 +234,70 @@ function DayBlocks() {
     if (extendTimerRef.current) window.clearTimeout(extendTimerRef.current);
     extendTimerRef.current = window.setTimeout(() => {
       if (suppressScrollRef.current) return;
+      const chunk = CHUNK_PAGES * PAGE_SIZE;
       const totalPages = Math.ceil((daysBefore + daysAfter) / PAGE_SIZE);
-      if (idx >= totalPages - 2) setDaysAfter((d) => d + CHUNK);
-      if (idx <= 1) setDaysBefore((d) => d + CHUNK);
+      if (idx >= totalPages - 2) setDaysAfter((d) => d + chunk);
+      if (idx <= 1) setDaysBefore((d) => d + chunk);
     }, 120);
   };
+
+  const zoomStep = useCallback((direction) => {
+    const pages = pagesForGestureRef.current;
+    const idx = pageIndexRef.current;
+    const anchor = (pages[idx] && pages[idx][0]) || new Date();
+    anchorDateRef.current = anchor;
+    setZoomIndex((z) => Math.max(0, Math.min(ZOOM_LEVELS.length - 1, z + direction)));
+  }, []);
+
+  // pinch-to-zoom: native listeners so touchmove can preventDefault (React's
+  // synthetic touch handlers are passive and can't block the browser's own gesture)
+  useEffect(() => {
+    const el = pagerRef.current;
+    if (!el) return;
+
+    const dist = (t0, t1) => Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+
+    const onTouchStart = (e) => {
+      if (e.touches.length === 2) {
+        const d = dist(e.touches[0], e.touches[1]);
+        pinchRef.current = { active: true, startDist: d, lastDist: d };
+      }
+    };
+    const onTouchMove = (e) => {
+      if (pinchRef.current.active && e.touches.length === 2) {
+        e.preventDefault();
+        pinchRef.current.lastDist = dist(e.touches[0], e.touches[1]);
+      }
+    };
+    const onTouchEnd = (e) => {
+      if (pinchRef.current.active && e.touches.length < 2) {
+        const { startDist, lastDist } = pinchRef.current;
+        pinchRef.current.active = false;
+        if (startDist > 10) {
+          const ratio = lastDist / startDist;
+          if (ratio > 1.25) zoomStep(-1);       // fingers spread apart -> bigger blocks
+          else if (ratio < 0.8) zoomStep(1);    // fingers pinched together -> whole month
+        }
+      }
+    };
+
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('touchend', onTouchEnd, { passive: true });
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [zoomStep]);
 
   const allDates = Array.from({ length: daysBefore + daysAfter }, (_, i) => addDays(today, i - daysBefore));
   const pages = [];
   for (let i = 0; i < allDates.length; i += PAGE_SIZE) pages.push(allDates.slice(i, i + PAGE_SIZE));
+  pagesForGestureRef.current = pages;
+  pageIndexRef.current = pageIndex;
 
   const headerDate = (pages[pageIndex] && pages[pageIndex][0]) || today;
   const headerLabel = `${MONTH_NAMES[headerDate.getMonth()]} ${headerDate.getFullYear()}`;
@@ -251,6 +335,13 @@ function DayBlocks() {
 
         .db-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 14px 0; flex-shrink: 0; }
         .db-title { font-size: 17px; letter-spacing: 1px; font-weight: 700; }
+        .db-header-actions { display: flex; align-items: center; gap: 6px; }
+        .db-zoom-btn {
+          background: transparent; border: 1px solid var(--text); color: var(--text);
+          font-family: inherit; font-size: 14px; line-height: 1;
+          width: 28px; height: 28px; cursor: pointer;
+        }
+        .db-zoom-btn:active { border-color: var(--accent); color: var(--accent); }
         .db-today-btn {
           background: transparent; border: 1px solid var(--text); color: var(--text);
           font-family: inherit; font-size: 10px; letter-spacing: 1px;
@@ -274,9 +365,6 @@ function DayBlocks() {
           min-width: 100%;
           scroll-snap-align: start;
           display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          grid-template-rows: repeat(3, 1fr);
-          gap: 7px;
           padding: 2px 10px 10px;
           min-height: 0;
         }
@@ -294,6 +382,10 @@ function DayBlocks() {
           overflow: hidden;
         }
         .db-day.is-today { box-shadow: inset 0 0 0 2px var(--accent); }
+        .db-day.mini { padding: 4px; align-items: center; justify-content: center; }
+        .db-day-mini-num { font-size: 12px; font-weight: 700; }
+        .db-day-mini-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-top: 3px; }
+        .db-day.mini[style] .db-day-mini-dot { background: currentColor; opacity: 0.6; }
 
         .db-day-top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; flex-shrink: 0; }
         .db-day-name { font-size: 11.5px; letter-spacing: 1px; opacity: 0.75; font-weight: 700; }
@@ -361,7 +453,11 @@ function DayBlocks() {
 
       <div className="db-header">
         <div className="db-title">{headerLabel}</div>
-        <button className="db-today-btn" onClick={scrollToToday}>TODAY</button>
+        <div className="db-header-actions">
+          <button className="db-zoom-btn" onClick={() => zoomStep(1)} aria-label="Zoom out">−</button>
+          <button className="db-zoom-btn" onClick={() => zoomStep(-1)} aria-label="Zoom in">+</button>
+          <button className="db-today-btn" onClick={scrollToToday}>TODAY</button>
+        </div>
       </div>
       <div className="db-hint">
         <span>TAP A BLOCK TO SET IT</span>
@@ -373,7 +469,15 @@ function DayBlocks() {
       ) : (
         <div className="db-pager" ref={pagerRef} onScroll={handleScroll}>
           {pages.map((pageDates, pIdx) => (
-            <div className="db-page" key={pIdx}>
+            <div
+              className="db-page"
+              key={pIdx}
+              style={{
+                gridTemplateColumns: `repeat(${cols}, 1fr)`,
+                gridTemplateRows: `repeat(${rows}, 1fr)`,
+                gap: tier === 'mini' ? '4px' : '7px',
+              }}
+            >
               {pageDates.map((date) => {
                 const key = formatKey(date);
                 const day = getDay(key);
@@ -381,6 +485,21 @@ function DayBlocks() {
                 const bg = day.color || undefined;
                 const style = bg ? { background: bg, color: textColorFor(bg) } : undefined;
                 const activities = day.activities || [];
+
+                if (tier === 'mini') {
+                  return (
+                    <div
+                      key={key}
+                      className={`db-day mini${isToday ? ' is-today' : ''}`}
+                      style={style}
+                      onClick={() => openModal(key)}
+                    >
+                      <span className="db-day-mini-num">{date.getDate()}</span>
+                      {day.main && <span className="db-day-mini-dot" />}
+                    </div>
+                  );
+                }
+
                 return (
                   <div
                     key={key}
