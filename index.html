@@ -39,13 +39,16 @@ const PALETTE = ['#F5A623', '#34D399', '#4E9EFF', '#9B6BFF', '#FF6FA5', '#2DD4C7
 const ZOOM_LEVELS = [
   { cols: 2, rows: 2, tier: 'full' },
   { cols: 3, rows: 3, tier: 'full' },
-  { cols: 5, rows: 6, tier: 'mini' },
+  { cols: 7, rows: 5, tier: 'mini' },
 ];
 const DEFAULT_ZOOM = 1; // index into ZOOM_LEVELS — starts at 3x3
 const INITIAL_BEFORE = 36; // 4 pages at the default 3x3 zoom
 const INITIAL_AFTER = 45;  // 5 pages at the default 3x3 zoom
 const CHUNK_PAGES = 5;     // extend by this many pages (not days) when nearing either edge — scales with zoom
-const APP_VERSION = 'V4.1';
+const INITIAL_MONTHS_BEFORE = 4; // whole-month view: months of past pre-loaded
+const INITIAL_MONTHS_AFTER = 8;  // whole-month view: months of future pre-loaded
+const MONTH_CHUNK = 6;           // extend by this many months when nearing either edge
+const APP_VERSION = 'V4.2';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -63,6 +66,15 @@ function formatKey(date) {
 function parseKey(key) {
   const [y, m, d] = key.split('-').map(Number);
   return new Date(y, m - 1, d);
+}
+
+function daysInMonth(year, month) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function getMonthDays(year, month) {
+  const n = daysInMonth(year, month);
+  return Array.from({ length: n }, (_, i) => new Date(year, month, i + 1));
 }
 
 function textColorFor(hex) {
@@ -89,6 +101,8 @@ function DayBlocks() {
   const [pageIndex, setPageIndex] = useState(0);
   const [daysBefore, setDaysBefore] = useState(INITIAL_BEFORE);
   const [daysAfter, setDaysAfter] = useState(INITIAL_AFTER);
+  const [monthsBefore, setMonthsBefore] = useState(INITIAL_MONTHS_BEFORE);
+  const [monthsAfter, setMonthsAfter] = useState(INITIAL_MONTHS_AFTER);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM);
 
   const { cols, rows, tier } = ZOOM_LEVELS[zoomIndex];
@@ -96,6 +110,7 @@ function DayBlocks() {
 
   const pagerRef = useRef(null);
   const prevBeforeRef = useRef(INITIAL_BEFORE);
+  const prevMonthsBeforeRef = useRef(INITIAL_MONTHS_BEFORE);
   const suppressScrollRef = useRef(false);
   const suppressTimerRef = useRef(null);
   const extendTimerRef = useRef(null);
@@ -154,17 +169,63 @@ function DayBlocks() {
     prevBeforeRef.current = daysBefore;
   }, [daysBefore]);
 
-  // when zoom level changes, re-find the date we were looking at and land back on it
+  // same idea, for the whole-month tier's month range
+  useLayoutEffect(() => {
+    const prev = prevMonthsBeforeRef.current;
+    const delta = monthsBefore - prev;
+    if (delta > 0 && pagerRef.current && tier === 'mini') {
+      suppressScrollFor(200);
+      const pageWidth = pagerRef.current.clientWidth;
+      pagerRef.current.scrollLeft += delta * pageWidth;
+      setPageIndex((p) => p + delta);
+    }
+    prevMonthsBeforeRef.current = monthsBefore;
+  }, [monthsBefore]);
+
+  // when zoom level changes, re-find the date we were looking at and land back on it —
+  // extending whichever range (days, or months for the whole-month tier) is needed to reach it
   useLayoutEffect(() => {
     if (!pagerRef.current || loading) return;
-    suppressScrollFor(200);
     const anchor = anchorDateRef.current;
-    const offsetDays = Math.round((anchor - today) / 86400000);
-    const indexInAll = daysBefore + offsetDays;
-    const newPage = Math.max(0, Math.floor(indexInAll / PAGE_SIZE));
+    const level = ZOOM_LEVELS[zoomIndex];
     const pageWidth = pagerRef.current.clientWidth;
-    pagerRef.current.scrollLeft = newPage * pageWidth;
-    setPageIndex(newPage);
+
+    if (level.tier === 'mini') {
+      const monthOffset = (anchor.getFullYear() - today.getFullYear()) * 12 + (anchor.getMonth() - today.getMonth());
+      let reqBefore = monthsBefore;
+      let reqAfter = monthsAfter;
+      if (monthOffset < 0) reqBefore = Math.max(monthsBefore, -monthOffset + 2);
+      else reqAfter = Math.max(monthsAfter, monthOffset + 3);
+
+      if (reqBefore !== monthsBefore) {
+        prevMonthsBeforeRef.current = reqBefore; // this effect is already handling the scroll adjustment
+        setMonthsBefore(reqBefore);
+      }
+      if (reqAfter !== monthsAfter) setMonthsAfter(reqAfter);
+
+      suppressScrollFor(200);
+      const newPage = reqBefore + monthOffset;
+      pagerRef.current.scrollLeft = newPage * pageWidth;
+      setPageIndex(newPage);
+    } else {
+      const offsetDays = Math.round((anchor - today) / 86400000);
+      let reqBeforeDays = daysBefore;
+      let reqAfterDays = daysAfter;
+      if (offsetDays < 0) reqBeforeDays = Math.max(daysBefore, -offsetDays + PAGE_SIZE * 2);
+      else reqAfterDays = Math.max(daysAfter, offsetDays + PAGE_SIZE * 3);
+
+      if (reqBeforeDays !== daysBefore) {
+        prevBeforeRef.current = reqBeforeDays;
+        setDaysBefore(reqBeforeDays);
+      }
+      if (reqAfterDays !== daysAfter) setDaysAfter(reqAfterDays);
+
+      suppressScrollFor(200);
+      const indexInAll = reqBeforeDays + offsetDays;
+      const newPage = Math.max(0, Math.floor(indexInAll / PAGE_SIZE));
+      pagerRef.current.scrollLeft = newPage * pageWidth;
+      setPageIndex(newPage);
+    }
     // eslint-disable-next-line
   }, [zoomIndex]);
 
@@ -219,7 +280,7 @@ function DayBlocks() {
     if (pagerRef.current) {
       suppressScrollFor(700);
       const pageWidth = pagerRef.current.clientWidth;
-      const todayPage = Math.floor(daysBefore / PAGE_SIZE);
+      const todayPage = tier === 'mini' ? monthsBefore : Math.floor(daysBefore / PAGE_SIZE);
       pagerRef.current.scrollTo({ left: todayPage * pageWidth, behavior: 'smooth' });
       setPageIndex(todayPage);
     }
@@ -234,10 +295,16 @@ function DayBlocks() {
     if (extendTimerRef.current) window.clearTimeout(extendTimerRef.current);
     extendTimerRef.current = window.setTimeout(() => {
       if (suppressScrollRef.current) return;
-      const chunk = CHUNK_PAGES * PAGE_SIZE;
-      const totalPages = Math.ceil((daysBefore + daysAfter) / PAGE_SIZE);
-      if (idx >= totalPages - 2) setDaysAfter((d) => d + chunk);
-      if (idx <= 1) setDaysBefore((d) => d + chunk);
+      if (tier === 'mini') {
+        const totalPages = monthsBefore + monthsAfter;
+        if (idx >= totalPages - 2) setMonthsAfter((m) => m + MONTH_CHUNK);
+        if (idx <= 1) setMonthsBefore((m) => m + MONTH_CHUNK);
+      } else {
+        const chunk = CHUNK_PAGES * PAGE_SIZE;
+        const totalPages = Math.ceil((daysBefore + daysAfter) / PAGE_SIZE);
+        if (idx >= totalPages - 2) setDaysAfter((d) => d + chunk);
+        if (idx <= 1) setDaysBefore((d) => d + chunk);
+      }
     }, 120);
   };
 
@@ -293,9 +360,16 @@ function DayBlocks() {
     };
   }, [zoomStep, loading]);
 
-  const allDates = Array.from({ length: daysBefore + daysAfter }, (_, i) => addDays(today, i - daysBefore));
-  const pages = [];
-  for (let i = 0; i < allDates.length; i += PAGE_SIZE) pages.push(allDates.slice(i, i + PAGE_SIZE));
+  let pages = [];
+  if (tier === 'mini') {
+    for (let i = -monthsBefore; i < monthsAfter; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth() + i, 1);
+      pages.push(getMonthDays(d.getFullYear(), d.getMonth()));
+    }
+  } else {
+    const allDates = Array.from({ length: daysBefore + daysAfter }, (_, i) => addDays(today, i - daysBefore));
+    for (let i = 0; i < allDates.length; i += PAGE_SIZE) pages.push(allDates.slice(i, i + PAGE_SIZE));
+  }
   pagesForGestureRef.current = pages;
   pageIndexRef.current = pageIndex;
 
@@ -384,7 +458,7 @@ function DayBlocks() {
         }
         .db-day.is-today { box-shadow: inset 0 0 0 2px var(--accent); }
         .db-day.mini { padding: 4px; align-items: center; justify-content: center; }
-        .db-day-mini-num { font-size: 12px; font-weight: 700; }
+        .db-day-mini-num { font-size: 11px; font-weight: 700; }
         .db-day-mini-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-top: 3px; }
         .db-day.mini[style] .db-day-mini-dot { background: currentColor; opacity: 0.6; }
 
@@ -469,13 +543,15 @@ function DayBlocks() {
         <div className="db-loading">LOADING…</div>
       ) : (
         <div className="db-pager" ref={pagerRef} onScroll={handleScroll}>
-          {pages.map((pageDates, pIdx) => (
+          {pages.map((pageDates, pIdx) => {
+            const pageRows = tier === 'mini' ? Math.ceil(pageDates.length / cols) : rows;
+            return (
             <div
               className="db-page"
               key={pIdx}
               style={{
                 gridTemplateColumns: `repeat(${cols}, 1fr)`,
-                gridTemplateRows: `repeat(${rows}, 1fr)`,
+                gridTemplateRows: `repeat(${pageRows}, 1fr)`,
                 gap: tier === 'mini' ? '4px' : '7px',
               }}
             >
@@ -529,7 +605,8 @@ function DayBlocks() {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
