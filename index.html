@@ -48,7 +48,7 @@ const CHUNK_PAGES = 5;     // extend by this many pages (not days) when nearing 
 const INITIAL_MONTHS_BEFORE = 4; // whole-month view: months of past pre-loaded
 const INITIAL_MONTHS_AFTER = 8;  // whole-month view: months of future pre-loaded
 const MONTH_CHUNK = 6;           // extend by this many months when nearing either edge
-const APP_VERSION = 'V4.2';
+const APP_VERSION = 'V4.3';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -209,10 +209,13 @@ function DayBlocks() {
       setPageIndex(newPage);
     } else {
       const offsetDays = Math.round((anchor - today) / 86400000);
-      let reqBeforeDays = daysBefore;
-      let reqAfterDays = daysAfter;
-      if (offsetDays < 0) reqBeforeDays = Math.max(daysBefore, -offsetDays + PAGE_SIZE * 2);
-      else reqAfterDays = Math.max(daysAfter, offsetDays + PAGE_SIZE * 3);
+      let minBeforeDays = daysBefore;
+      if (offsetDays < 0) minBeforeDays = Math.max(daysBefore, -offsetDays + PAGE_SIZE * 2);
+      // align so the anchor day lands as the FIRST day of its page, not wherever it falls
+      // within the existing chunking — otherwise the page can start a few days earlier
+      const rem = ((minBeforeDays + offsetDays) % PAGE_SIZE + PAGE_SIZE) % PAGE_SIZE;
+      const reqBeforeDays = rem === 0 ? minBeforeDays : minBeforeDays + (PAGE_SIZE - rem);
+      const reqAfterDays = Math.max(daysAfter, offsetDays + PAGE_SIZE * 3);
 
       if (reqBeforeDays !== daysBefore) {
         prevBeforeRef.current = reqBeforeDays;
@@ -221,8 +224,7 @@ function DayBlocks() {
       if (reqAfterDays !== daysAfter) setDaysAfter(reqAfterDays);
 
       suppressScrollFor(200);
-      const indexInAll = reqBeforeDays + offsetDays;
-      const newPage = Math.max(0, Math.floor(indexInAll / PAGE_SIZE));
+      const newPage = Math.round((reqBeforeDays + offsetDays) / PAGE_SIZE);
       pagerRef.current.scrollLeft = newPage * pageWidth;
       setPageIndex(newPage);
     }
@@ -311,8 +313,12 @@ function DayBlocks() {
   const zoomStep = useCallback((direction) => {
     const pages = pagesForGestureRef.current;
     const idx = pageIndexRef.current;
-    const anchor = (pages[idx] && pages[idx][0]) || new Date();
-    anchorDateRef.current = anchor;
+    const pageDates = pages[idx] || [];
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    const nowKey = formatKey(now);
+    const hasToday = pageDates.some((d) => formatKey(d) === nowKey);
+    anchorDateRef.current = hasToday ? now : (pageDates[0] || now);
     setZoomIndex((z) => Math.max(0, Math.min(ZOOM_LEVELS.length - 1, z + direction)));
   }, []);
 
