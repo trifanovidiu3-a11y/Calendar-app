@@ -48,7 +48,7 @@ const CHUNK_PAGES = 5;     // extend by this many pages (not days) when nearing 
 const INITIAL_MONTHS_BEFORE = 4; // whole-month view: months of past pre-loaded
 const INITIAL_MONTHS_AFTER = 8;  // whole-month view: months of future pre-loaded
 const MONTH_CHUNK = 6;           // extend by this many months when nearing either edge
-const APP_VERSION = 'V4.3';
+const APP_VERSION = 'V5.0';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -115,7 +115,9 @@ function DayBlocks() {
   const suppressTimerRef = useRef(null);
   const extendTimerRef = useRef(null);
   const anchorDateRef = useRef(today);
-  const pinchRef = useRef({ active: false, startDist: 0, lastDist: 0 });
+  const pinchRef = useRef({ active: false, startDist: 0, lastDist: 0, midX: 0, midY: 0 });
+  const zoomIndexRef = useRef(DEFAULT_ZOOM);
+  const zoomAnimTimerRef = useRef(null);
   const pagesForGestureRef = useRef([]);
   const pageIndexRef = useRef(0);
 
@@ -310,17 +312,74 @@ function DayBlocks() {
     }, 120);
   };
 
-  const zoomStep = useCallback((direction) => {
+  // the actual zoom state change — same anchor logic as before, now takes an optional
+  // explicit focal date (from a pinch) instead of always inferring one
+  const applyZoom = useCallback((direction, focalDateKey) => {
     const pages = pagesForGestureRef.current;
     const idx = pageIndexRef.current;
     const pageDates = pages[idx] || [];
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    const nowKey = formatKey(now);
-    const hasToday = pageDates.some((d) => formatKey(d) === nowKey);
-    anchorDateRef.current = hasToday ? now : (pageDates[0] || now);
+    let anchor;
+    if (focalDateKey) {
+      anchor = parseKey(focalDateKey);
+    } else {
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+      const nowKey = formatKey(now);
+      const hasToday = pageDates.some((d) => formatKey(d) === nowKey);
+      anchor = hasToday ? now : (pageDates[0] || now);
+    }
+    anchorDateRef.current = anchor;
     setZoomIndex((z) => Math.max(0, Math.min(ZOOM_LEVELS.length - 1, z + direction)));
   }, []);
+
+  // orchestrates the visual transition: the outgoing grid scales/fades away toward the
+  // focal point, then the incoming grid starts scaled from the opposite direction and
+  // settles to normal — both anchored at the same point, like a photo app pinch-zoom
+  const runZoomTransition = useCallback((direction, focalPoint, focalDateKey) => {
+    const current = zoomIndexRef.current;
+    const next = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, current + direction));
+    if (next === current) return; // already at that end — nothing to animate
+
+    const el = pagerRef.current;
+    if (!el) { applyZoom(direction, focalDateKey); return; }
+
+    const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) { applyZoom(direction, focalDateKey); return; }
+
+    const rect = el.getBoundingClientRect();
+    const originX = focalPoint ? ((focalPoint.x - rect.left) / rect.width) * 100 : 50;
+    const originY = focalPoint ? ((focalPoint.y - rect.top) / rect.height) * 100 : 50;
+    el.style.setProperty('--zoom-origin-x', `${Math.max(0, Math.min(100, originX))}%`);
+    el.style.setProperty('--zoom-origin-y', `${Math.max(0, Math.min(100, originY))}%`);
+
+    if (zoomAnimTimerRef.current) window.clearTimeout(zoomAnimTimerRef.current);
+
+    const outScale = direction < 0 ? 1.4 : 0.65;
+    el.style.setProperty('--zoom-scale', String(outScale));
+    el.classList.add('zoom-out');
+
+    zoomAnimTimerRef.current = window.setTimeout(() => {
+      applyZoom(direction, focalDateKey);
+      el.classList.remove('zoom-out');
+
+      const inStartScale = direction < 0 ? 0.7 : 1.35;
+      el.style.setProperty('--zoom-scale', String(inStartScale));
+      el.classList.add('zoom-in-start');
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          el.classList.remove('zoom-in-start');
+          el.classList.add('zoom-in-settle');
+          window.setTimeout(() => {
+            el.classList.remove('zoom-in-settle');
+          }, 260);
+        });
+      });
+    }, 190);
+  }, [applyZoom]);
+
+  const zoomStep = useCallback((direction) => {
+    runZoomTransition(direction, null, null);
+  }, [runZoomTransition]);
 
   // pinch-to-zoom: native listeners so touchmove can preventDefault (React's
   // synthetic touch handlers are passive and can't block the browser's own gesture)
@@ -329,27 +388,39 @@ function DayBlocks() {
     if (!el) return;
 
     const dist = (t0, t1) => Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+    const midpoint = (t0, t1) => ({ x: (t0.clientX + t1.clientX) / 2, y: (t0.clientY + t1.clientY) / 2 });
 
     const onTouchStart = (e) => {
       if (e.touches.length === 2) {
         const d = dist(e.touches[0], e.touches[1]);
-        pinchRef.current = { active: true, startDist: d, lastDist: d };
+        const m = midpoint(e.touches[0], e.touches[1]);
+        pinchRef.current = { active: true, startDist: d, lastDist: d, midX: m.x, midY: m.y };
       }
     };
     const onTouchMove = (e) => {
       if (pinchRef.current.active && e.touches.length === 2) {
         e.preventDefault();
         pinchRef.current.lastDist = dist(e.touches[0], e.touches[1]);
+        const m = midpoint(e.touches[0], e.touches[1]);
+        pinchRef.current.midX = m.x;
+        pinchRef.current.midY = m.y;
       }
     };
     const onTouchEnd = (e) => {
       if (pinchRef.current.active && e.touches.length < 2) {
-        const { startDist, lastDist } = pinchRef.current;
+        const { startDist, lastDist, midX, midY } = pinchRef.current;
         pinchRef.current.active = false;
         if (startDist > 10) {
           const ratio = lastDist / startDist;
-          if (ratio > 1.25) zoomStep(-1);       // fingers spread apart -> bigger blocks
-          else if (ratio < 0.8) zoomStep(1);    // fingers pinched together -> whole month
+          let direction = 0;
+          if (ratio > 1.25) direction = -1;       // fingers spread apart -> bigger blocks
+          else if (ratio < 0.8) direction = 1;    // fingers pinched together -> whole month
+          if (direction !== 0) {
+            const targetEl = document.elementFromPoint(midX, midY);
+            const dayEl = targetEl && targetEl.closest ? targetEl.closest('[data-date]') : null;
+            const focalDateKey = dayEl ? dayEl.getAttribute('data-date') : null;
+            runZoomTransition(direction, { x: midX, y: midY }, focalDateKey);
+          }
         }
       }
     };
@@ -364,7 +435,7 @@ function DayBlocks() {
       el.removeEventListener('touchend', onTouchEnd);
       el.removeEventListener('touchcancel', onTouchEnd);
     };
-  }, [zoomStep, loading]);
+  }, [runZoomTransition, loading]);
 
   let pages = [];
   if (tier === 'mini') {
@@ -378,6 +449,7 @@ function DayBlocks() {
   }
   pagesForGestureRef.current = pages;
   pageIndexRef.current = pageIndex;
+  zoomIndexRef.current = zoomIndex;
 
   const headerDate = (pages[pageIndex] && pages[pageIndex][0]) || today;
   const headerLabel = `${MONTH_NAMES[headerDate.getMonth()]} ${headerDate.getFullYear()}`;
@@ -440,6 +512,33 @@ function DayBlocks() {
           -webkit-overflow-scrolling: touch;
           touch-action: pan-x;
           min-height: 0;
+        }
+        .db-pager.zoom-out {
+          transition: transform 190ms cubic-bezier(0.3, 0, 1, 1), opacity 190ms cubic-bezier(0.3, 0, 1, 1);
+          transform-origin: var(--zoom-origin-x, 50%) var(--zoom-origin-y, 50%);
+          transform: scale(var(--zoom-scale, 1));
+          opacity: 0;
+          will-change: transform, opacity;
+        }
+        .db-pager.zoom-in-start {
+          transition: none;
+          transform-origin: var(--zoom-origin-x, 50%) var(--zoom-origin-y, 50%);
+          transform: scale(var(--zoom-scale, 1));
+          opacity: 0;
+        }
+        .db-pager.zoom-in-settle {
+          transition: transform 260ms cubic-bezier(0.2, 0, 0, 1), opacity 260ms cubic-bezier(0.2, 0, 0, 1);
+          transform-origin: var(--zoom-origin-x, 50%) var(--zoom-origin-y, 50%);
+          transform: scale(1);
+          opacity: 1;
+          will-change: transform, opacity;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .db-pager.zoom-out, .db-pager.zoom-in-start, .db-pager.zoom-in-settle {
+            transition: none !important;
+            transform: none !important;
+            opacity: 1 !important;
+          }
         }
         .db-page {
           flex: 0 0 100%;
@@ -573,6 +672,7 @@ function DayBlocks() {
                   return (
                     <div
                       key={key}
+                      data-date={key}
                       className={`db-day mini${isToday ? ' is-today' : ''}`}
                       style={style}
                       onClick={() => openModal(key)}
@@ -586,6 +686,7 @@ function DayBlocks() {
                 return (
                   <div
                     key={key}
+                    data-date={key}
                     className={`db-day${isToday ? ' is-today' : ''}`}
                     style={style}
                     onClick={() => openModal(key)}
