@@ -48,7 +48,7 @@ const CHUNK_PAGES = 5;     // extend by this many pages (not days) when nearing 
 const INITIAL_MONTHS_BEFORE = 4; // whole-month view: months of past pre-loaded
 const INITIAL_MONTHS_AFTER = 8;  // whole-month view: months of future pre-loaded
 const MONTH_CHUNK = 6;           // extend by this many months when nearing either edge
-const APP_VERSION = 'V6.0';
+const APP_VERSION = 'V6.1';
 
 function addDays(date, n) {
   const d = new Date(date);
@@ -95,11 +95,12 @@ function pageGeometry(dates, cols, rows, tier, containerW, containerH) {
 }
 
 // what dates a given zoom level would show if its page started at `anchor`
-function levelPageDates(levelIdx, anchor) {
+function levelPageDates(levelIdx, anchor, centered) {
   const level = ZOOM_LEVELS[levelIdx];
   if (level.tier === 'mini') return getMonthDays(anchor.getFullYear(), anchor.getMonth());
   const size = level.cols * level.rows;
-  return Array.from({ length: size }, (_, i) => addDays(anchor, i));
+  const start = centered ? addDays(anchor, -Math.floor(size / 2)) : anchor;
+  return Array.from({ length: size }, (_, i) => addDays(start, i));
 }
 
 function textColorFor(hex) {
@@ -139,7 +140,7 @@ function DayBlocks() {
   const suppressScrollRef = useRef(false);
   const suppressTimerRef = useRef(null);
   const extendTimerRef = useRef(null);
-  const anchorDateRef = useRef(today);
+  const anchorDateRef = useRef({ date: today, centered: false });
   const pinchRef = useRef({ active: false, startDist: 0, lastDist: 0, midX: 0, midY: 0, direction: 0 });
   const zoomIndexRef = useRef(DEFAULT_ZOOM);
   const overlayRef = useRef(null);
@@ -215,7 +216,7 @@ function DayBlocks() {
   // extending whichever range (days, or months for the whole-month tier) is needed to reach it
   useLayoutEffect(() => {
     if (!pagerRef.current || loading) return;
-    const anchor = anchorDateRef.current;
+    const { date: anchor, centered } = anchorDateRef.current;
     const level = ZOOM_LEVELS[zoomIndex];
     const pageWidth = pagerRef.current.clientWidth;
 
@@ -238,11 +239,12 @@ function DayBlocks() {
       setPageIndex(newPage);
     } else {
       const offsetDays = Math.round((anchor - today) / 86400000);
+      // a pinch centers the anchor day within its page; a generic (button) zoom keeps it
+      // as the first day, which is what avoids spilling into the wrong month at that tier
+      const targetRem = centered ? Math.floor(PAGE_SIZE / 2) : 0;
       let minBeforeDays = daysBefore;
       if (offsetDays < 0) minBeforeDays = Math.max(daysBefore, -offsetDays + PAGE_SIZE * 2);
-      // align so the anchor day lands as the FIRST day of its page, not wherever it falls
-      // within the existing chunking — otherwise the page can start a few days earlier
-      const rem = ((minBeforeDays + offsetDays) % PAGE_SIZE + PAGE_SIZE) % PAGE_SIZE;
+      const rem = ((minBeforeDays + offsetDays - targetRem) % PAGE_SIZE + PAGE_SIZE) % PAGE_SIZE;
       const reqBeforeDays = rem === 0 ? minBeforeDays : minBeforeDays + (PAGE_SIZE - rem);
       const reqAfterDays = Math.max(daysAfter, offsetDays + PAGE_SIZE * 3);
 
@@ -253,7 +255,7 @@ function DayBlocks() {
       if (reqAfterDays !== daysAfter) setDaysAfter(reqAfterDays);
 
       suppressScrollFor(200);
-      const newPage = Math.round((reqBeforeDays + offsetDays) / PAGE_SIZE);
+      const newPage = (reqBeforeDays + offsetDays - targetRem) / PAGE_SIZE;
       pagerRef.current.scrollLeft = newPage * pageWidth;
       setPageIndex(newPage);
     }
@@ -342,7 +344,7 @@ function DayBlocks() {
   // the actual zoom state change — unchanged from before: figures out the anchor date
   // (explicit, from a pinch/transition, or inferred) and lets the existing zoom-anchor
   // effect handle range-extension, alignment, and scroll positioning
-  const applyZoom = useCallback((direction, focalDateKey) => {
+  const applyZoom = useCallback((direction, focalDateKey, centered) => {
     const pages = pagesForGestureRef.current;
     const idx = pageIndexRef.current;
     const pageDates = pages[idx] || [];
@@ -356,7 +358,7 @@ function DayBlocks() {
       const hasToday = pageDates.some((d) => formatKey(d) === nowKey);
       anchor = hasToday ? now : (pageDates[0] || now);
     }
-    anchorDateRef.current = anchor;
+    anchorDateRef.current = { date: anchor, centered: centered ?? !!focalDateKey };
     setZoomIndex((z) => Math.max(0, Math.min(ZOOM_LEVELS.length - 1, z + direction)));
   }, []);
 
@@ -420,12 +422,13 @@ function DayBlocks() {
     if (!pagerEl || !overlayEl) return false;
 
     const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reducedMotion) { applyZoom(direction, focalDateKey); return false; }
+    if (reducedMotion) { applyZoom(direction, focalDateKey, !!focalDateKey); return false; }
 
     const rect = pagerEl.getBoundingClientRect();
     const W = rect.width, H = rect.height;
 
     let anchor;
+    const centered = !!focalDateKey; // a pinch on a specific day centers it; a generic zoom doesn't
     if (focalDateKey) {
       anchor = parseKey(focalDateKey);
     } else {
@@ -443,7 +446,7 @@ function DayBlocks() {
     const fromRows = fromLevelObj.tier === 'mini' ? Math.ceil(fromDates.length / fromLevelObj.cols) : fromLevelObj.rows;
     const fromGeom = pageGeometry(fromDates, fromLevelObj.cols, fromRows, fromLevelObj.tier, W, H);
 
-    const toDates = levelPageDates(toLevel, anchor);
+    const toDates = levelPageDates(toLevel, anchor, centered);
     const toLevelObj = ZOOM_LEVELS[toLevel];
     const toRows = toLevelObj.tier === 'mini' ? Math.ceil(toDates.length / toLevelObj.cols) : toLevelObj.rows;
     const toGeom = pageGeometry(toDates, toLevelObj.cols, toRows, toLevelObj.tier, W, H);
@@ -475,7 +478,7 @@ function DayBlocks() {
     });
 
     transRef.current = {
-      active: true, fromLevel: current, toLevel, fromGeom, toGeom,
+      active: true, fromLevel: current, toLevel, fromGeom, toGeom, centered,
       anchorKey, anchorScreenX, anchorScreenY, unionKeys, els, lastProgress: 0, raf: null,
     };
 
@@ -507,7 +510,7 @@ function DayBlocks() {
         const overlayEl = overlayRef.current;
         if (commit) {
           const dir = t.toLevel > t.fromLevel ? 1 : -1;
-          applyZoom(dir, t.anchorKey);
+          applyZoom(dir, t.anchorKey, t.centered);
         }
         transRef.current.active = false;
         if (overlayEl) { overlayEl.style.display = 'none'; overlayEl.innerHTML = ''; }
@@ -581,8 +584,8 @@ function DayBlocks() {
       } else {
         const direction = pinchRef.current.direction;
         let progress;
-        if (direction === -1) progress = Math.max(0, Math.min(1, (ratio - 1) / 0.25));
-        else progress = Math.max(0, Math.min(1, (1 - ratio) / 0.2));
+        if (direction === -1) progress = Math.max(0, Math.min(1, (ratio - 1) / 0.8));
+        else progress = Math.max(0, Math.min(1, (1 - ratio) / 0.55));
         transRef.current.lastProgress = progress;
         renderTransitionFrame(progress);
       }
