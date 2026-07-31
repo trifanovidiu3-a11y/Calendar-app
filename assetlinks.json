@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.trifanovidiu3_a11y.twa",
+      "sha256_cert_fingerprints": ["CE:C7:C3:88:3D:8B:87:3C:5B:E9:8C:57:A2:EA:94:8D:C3:91:72:DC:7F:48:01:B1:46:64:89:6C:5E:66:C4:F2"]
+    }
+  }
+]
